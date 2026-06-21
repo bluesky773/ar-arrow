@@ -3,37 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
   <title>Minimal AR Arrow Navigation</title>
 
   <style>
     body {
       margin: 0;
-      font-family: system-ui, sans-serif;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: #111;
       color: white;
-    }
-
-    #setup {
-      position: fixed;
-      z-index: 10;
-      top: 0;
-      left: 0;
-      right: 0;
-      padding: 12px;
-      background: rgba(0, 0, 0, 0.85);
-    }
-
-    input, button {
-      width: 100%;
-      box-sizing: border-box;
-      margin: 4px 0;
-      padding: 10px;
-      font-size: 15px;
-    }
-
-    button {
-      cursor: pointer;
-      font-weight: 700;
     }
 
     #camera {
@@ -45,6 +23,45 @@
       background: black;
     }
 
+    #setup {
+      position: fixed;
+      z-index: 10;
+      top: 0;
+      left: 0;
+      right: 0;
+      padding: 12px;
+      background: rgba(0, 0, 0, 0.88);
+      max-height: 75vh;
+      overflow-y: auto;
+    }
+
+    input, button {
+      width: 100%;
+      box-sizing: border-box;
+      margin: 4px 0;
+      padding: 10px;
+      font-size: 15px;
+      border-radius: 6px;
+      border: none;
+    }
+
+    button {
+      cursor: pointer;
+      font-weight: 700;
+      background: #2d7dff;
+      color: white;
+    }
+
+    button.secondary {
+      background: #444;
+    }
+
+    .small {
+      font-size: 12px;
+      opacity: 0.8;
+      margin-top: 8px;
+    }
+
     #arrowLayer {
       position: fixed;
       inset: 0;
@@ -52,7 +69,8 @@
       display: flex;
       align-items: flex-end;
       justify-content: center;
-      padding-bottom: 110px;
+      padding-bottom: 115px;
+      z-index: 3;
     }
 
     #arrow {
@@ -65,18 +83,21 @@
 
     #info {
       position: fixed;
+      z-index: 5;
       left: 0;
       right: 0;
       bottom: 0;
       padding: 12px;
-      background: rgba(0, 0, 0, 0.75);
+      background: rgba(0, 0, 0, 0.78);
       font-size: 14px;
       line-height: 1.5;
     }
 
-    .small {
-      font-size: 12px;
-      opacity: 0.8;
+    #status {
+      color: #9ee493;
+      font-size: 13px;
+      margin-top: 6px;
+      line-height: 1.4;
     }
   </style>
 </head>
@@ -88,14 +109,20 @@
     <div class="small">현재 위치</div>
     <input id="curLat" placeholder="현재 위도 예: 37.5665" />
     <input id="curLng" placeholder="현재 경도 예: 126.9780" />
-
     <button id="gpsBtn">현재 위치 자동 입력</button>
 
-    <div class="small">목적지</div>
-    <input id="destLat" placeholder="목적지 위도 예: 37.5700" />
-    <input id="destLng" placeholder="목적지 경도 예: 126.9820" />
+    <div class="small">목적지 이름</div>
+    <input id="destName" placeholder="예: 경복궁, 서울역, 경기대학교 수원캠퍼스" />
+    <button id="searchDestBtn">목적지 좌표 찾기</button>
+
+    <div class="small">목적지 좌표</div>
+    <input id="destLat" placeholder="목적지 위도" />
+    <input id="destLng" placeholder="목적지 경도" />
 
     <button id="startBtn">카메라 + 화살표 시작</button>
+    <button id="showSetupBtn" class="secondary" style="display:none;">입력창 다시 열기</button>
+
+    <div id="status">대기 중</div>
   </div>
 
   <div id="arrowLayer">
@@ -120,8 +147,13 @@
     const camera = document.getElementById("camera");
     const arrow = document.getElementById("arrow");
 
+    const setup = document.getElementById("setup");
+    const statusBox = document.getElementById("status");
+
     const curLatInput = document.getElementById("curLat");
     const curLngInput = document.getElementById("curLng");
+
+    const destNameInput = document.getElementById("destName");
     const destLatInput = document.getElementById("destLat");
     const destLngInput = document.getElementById("destLng");
 
@@ -130,8 +162,19 @@
     const deltaText = document.getElementById("deltaText");
     const distanceText = document.getElementById("distanceText");
 
+    const gpsBtn = document.getElementById("gpsBtn");
+    const searchDestBtn = document.getElementById("searchDestBtn");
+    const startBtn = document.getElementById("startBtn");
+    const showSetupBtn = document.getElementById("showSetupBtn");
+
     let currentHeading = 0;
     let destinationBearing = 0;
+    let watchPositionId = null;
+    let compassStarted = false;
+
+    function setStatus(message) {
+      statusBox.textContent = message;
+    }
 
     function toRad(deg) {
       return deg * Math.PI / 180;
@@ -149,37 +192,39 @@
       return ((deg + 540) % 360) - 180;
     }
 
-    // 현재 위치에서 목적지까지의 방위각 계산
     function calculateBearing(lat1, lng1, lat2, lng2) {
-      const φ1 = toRad(lat1);
-      const φ2 = toRad(lat2);
-      const Δλ = toRad(lng2 - lng1);
+      const phi1 = toRad(lat1);
+      const phi2 = toRad(lat2);
+      const deltaLambda = toRad(lng2 - lng1);
 
-      const y = Math.sin(Δλ) * Math.cos(φ2);
+      const y = Math.sin(deltaLambda) * Math.cos(phi2);
       const x =
-        Math.cos(φ1) * Math.sin(φ2) -
-        Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+        Math.cos(phi1) * Math.sin(phi2) -
+        Math.sin(phi1) * Math.cos(phi2) * Math.cos(deltaLambda);
 
       return normalize360(toDeg(Math.atan2(y, x)));
     }
 
-    // 두 좌표 사이 거리 계산
     function calculateDistance(lat1, lng1, lat2, lng2) {
       const R = 6371000;
-      const φ1 = toRad(lat1);
-      const φ2 = toRad(lat2);
-      const Δφ = toRad(lat2 - lat1);
-      const Δλ = toRad(lng2 - lng1);
+
+      const phi1 = toRad(lat1);
+      const phi2 = toRad(lat2);
+      const deltaPhi = toRad(lat2 - lat1);
+      const deltaLambda = toRad(lng2 - lng1);
 
       const a =
-        Math.sin(Δφ / 2) ** 2 +
-        Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ / 2) ** 2;
+        Math.sin(deltaPhi / 2) ** 2 +
+        Math.cos(phi1) *
+        Math.cos(phi2) *
+        Math.sin(deltaLambda / 2) ** 2;
 
       const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
       return R * c;
     }
 
-    function updateArrow() {
+    function getInputCoordinates() {
       const curLat = parseFloat(curLatInput.value);
       const curLng = parseFloat(curLngInput.value);
       const destLat = parseFloat(destLatInput.value);
@@ -191,8 +236,25 @@
         Number.isNaN(destLat) ||
         Number.isNaN(destLng)
       ) {
+        return null;
+      }
+
+      return {
+        curLat,
+        curLng,
+        destLat,
+        destLng
+      };
+    }
+
+    function updateArrow() {
+      const coords = getInputCoordinates();
+
+      if (!coords) {
         return;
       }
+
+      const { curLat, curLng, destLat, destLng } = coords;
 
       destinationBearing = calculateBearing(curLat, curLng, destLat, destLng);
       const distance = calculateDistance(curLat, curLng, destLat, destLng);
@@ -207,10 +269,125 @@
       distanceText.textContent = distance.toFixed(1);
     }
 
+    async function searchDestinationByName() {
+      const query = destNameInput.value.trim();
+
+      if (!query) {
+        alert("목적지 이름을 입력하세요.");
+        return;
+      }
+
+      setStatus("목적지 좌표 검색 중...");
+
+      const url =
+        "https://nominatim.openstreetmap.org/search" +
+        "?format=json" +
+        "&limit=1" +
+        "&addressdetails=1" +
+        "&q=" + encodeURIComponent(query);
+
+      try {
+        const response = await fetch(url, {
+          headers: {
+            "Accept": "application/json"
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error("장소 검색 요청 실패");
+        }
+
+        const data = await response.json();
+
+        if (!data || data.length === 0) {
+          setStatus("장소를 찾지 못했습니다.");
+          alert("장소를 찾지 못했습니다. 더 구체적으로 입력하세요.");
+          return;
+        }
+
+        const place = data[0];
+
+        destLatInput.value = place.lat;
+        destLngInput.value = place.lon;
+
+        setStatus("목적지 좌표 검색 완료: " + place.display_name);
+
+        updateArrow();
+      } catch (error) {
+        setStatus("장소 검색 오류: " + error.message);
+        alert("장소 검색 중 오류 발생: " + error.message);
+      }
+    }
+
+    function getCurrentLocationOnce() {
+      if (!navigator.geolocation) {
+        alert("이 브라우저는 위치 기능을 지원하지 않습니다.");
+        return;
+      }
+
+      setStatus("현재 위치 가져오는 중...");
+
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          curLatInput.value = position.coords.latitude;
+          curLngInput.value = position.coords.longitude;
+
+          setStatus(
+            "현재 위치 입력 완료. 정확도: 약 " +
+            Math.round(position.coords.accuracy) +
+            "m"
+          );
+
+          updateArrow();
+        },
+        (error) => {
+          setStatus("현재 위치 가져오기 실패: " + error.message);
+          alert("현재 위치를 가져오지 못했습니다: " + error.message);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 0
+        }
+      );
+    }
+
+    function startWatchingLocation() {
+      if (!navigator.geolocation) {
+        return;
+      }
+
+      if (watchPositionId !== null) {
+        return;
+      }
+
+      watchPositionId = navigator.geolocation.watchPosition(
+        (position) => {
+          curLatInput.value = position.coords.latitude;
+          curLngInput.value = position.coords.longitude;
+          updateArrow();
+        },
+        (error) => {
+          setStatus("위치 추적 오류: " + error.message);
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: 1000,
+          timeout: 10000
+        }
+      );
+    }
+
     async function startCamera() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("이 브라우저는 카메라 기능을 지원하지 않습니다.");
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: { ideal: "environment" }
+          facingMode: {
+            ideal: "environment"
+          }
         },
         audio: false
       });
@@ -224,6 +401,7 @@
         typeof DeviceOrientationEvent.requestPermission === "function"
       ) {
         const result = await DeviceOrientationEvent.requestPermission();
+
         if (result !== "granted") {
           alert("방향 센서 권한이 필요합니다.");
           return false;
@@ -234,13 +412,16 @@
     }
 
     function startCompass() {
+      if (compassStarted) {
+        return;
+      }
+
+      compassStarted = true;
+
       window.addEventListener("deviceorientation", (event) => {
-        // iOS Safari 계열
         if (event.webkitCompassHeading !== undefined) {
           currentHeading = event.webkitCompassHeading;
-        }
-        // Android Chrome 계열
-        else if (event.alpha !== null) {
+        } else if (event.alpha !== null) {
           currentHeading = normalize360(360 - event.alpha);
         }
 
@@ -248,37 +429,62 @@
       });
     }
 
-    document.getElementById("gpsBtn").addEventListener("click", () => {
-      navigator.geolocation.getCurrentPosition(
-        (position) => {
-          curLatInput.value = position.coords.latitude;
-          curLngInput.value = position.coords.longitude;
-          updateArrow();
-        },
-        (error) => {
-          alert("현재 위치를 가져오지 못했습니다: " + error.message);
-        },
-        {
-          enableHighAccuracy: true,
-          timeout: 10000,
-          maximumAge: 0
-        }
-      );
+    function validateBeforeStart() {
+      const coords = getInputCoordinates();
+
+      if (!coords) {
+        alert("현재 위치와 목적지 좌표가 필요합니다.");
+        return false;
+      }
+
+      return true;
+    }
+
+    gpsBtn.addEventListener("click", () => {
+      getCurrentLocationOnce();
     });
 
-    document.getElementById("startBtn").addEventListener("click", async () => {
+    searchDestBtn.addEventListener("click", () => {
+      searchDestinationByName();
+    });
+
+    startBtn.addEventListener("click", async () => {
       try {
+        if (!validateBeforeStart()) {
+          return;
+        }
+
+        setStatus("카메라 시작 중...");
+
         await startCamera();
 
-        const ok = await requestOrientationPermissionIfNeeded();
-        if (!ok) return;
+        const permissionOk = await requestOrientationPermissionIfNeeded();
+
+        if (!permissionOk) {
+          return;
+        }
 
         startCompass();
+        startWatchingLocation();
         updateArrow();
 
-        document.getElementById("setup").style.display = "none";
+        setup.style.display = "none";
+        showSetupBtn.style.display = "block";
+
+        setStatus("실행 중");
       } catch (error) {
+        setStatus("실행 실패: " + error.message);
         alert("실행 실패: " + error.message);
+      }
+    });
+
+    showSetupBtn.addEventListener("click", () => {
+      setup.style.display = "block";
+    });
+
+    destNameInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        searchDestinationByName();
       }
     });
 
